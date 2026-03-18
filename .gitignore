@@ -1,0 +1,8 @@
+data/
+raw_imports/
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.db
+config.json
