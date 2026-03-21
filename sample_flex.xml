@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FlexQueryResponse queryName="TradeConfirmation" type="AF">
+<FlexStatements count="1">
+<FlexStatement accountId="U1234567" fromDate="2026-03-21" toDate="2026-03-21" whenGenerated="2026-03-22;08:30:00">
+<TradeConfirmations>
+<!-- Account: U1234567 (Main) - Stock trades -->
+<TradeConfirmation accountId="U1234567" acctAlias="Main" tradeID="EX001" orderID="ORD001" symbol="AAPL" underlyingSymbol="AAPL" assetCategory="STK" buySell="BOT" quantity="100" tradePrice="178.42" tradeDate="2026-03-21" tradeTime="09:45:00" commission="-1.00" brokerExecutionCharge="0" currency="USD" exchange="NASDAQ"/>
+<TradeConfirmation accountId="U1234567" acctAlias="Main" tradeID="EX002" orderID="ORD002" symbol="AAPL" underlyingSymbol="AAPL" assetCategory="STK" buySell="SLD" quantity="100" tradePrice="182.15" tradeDate="2026-03-21" tradeTime="14:22:00" commission="-1.00" brokerExecutionCharge="0" currency="USD" exchange="NASDAQ"/>
+<!-- Account: U1234567 (Main) - Another stock -->
+<TradeConfirmation accountId="U1234567" acctAlias="Main" tradeID="EX003" orderID="ORD003" symbol="NVDA" underlyingSymbol="NVDA" assetCategory="STK" buySell="SLD" quantity="10" tradePrice="892.30" tradeDate="2026-03-21" tradeTime="10:22:00" commission="-1.00" brokerExecutionCharge="0" currency="USD" exchange="NASDAQ"/>
+<TradeConfirmation accountId="U1234567" acctAlias="Main" tradeID="EX004" orderID="ORD004" symbol="NVDA" underlyingSymbol="NVDA" assetCategory="STK" buySell="BOT" quantity="10" tradePrice="887.10" tradeDate="2026-03-21" tradeTime="11:48:00" commission="-1.00" brokerExecutionCharge="0" currency="USD" exchange="NASDAQ"/>
+<!-- Account: U1234567 (Main) - Single-leg option -->
+<TradeConfirmation accountId="U1234567" acctAlias="Main" tradeID="EX005" orderID="ORD005" symbol="SPY 260321P00520000" underlyingSymbol="SPY" assetCategory="OPT" buySell="BOT" quantity="1" tradePrice="4.20" tradeDate="2026-03-21" tradeTime="09:50:00" commission="-0.65" brokerExecutionCharge="0" currency="USD" exchange="CBOE"/>
+<TradeConfirmation accountId="U1234567" acctAlias="Main" tradeID="EX006" orderID="ORD006" symbol="SPY 260321P00520000" underlyingSymbol="SPY" assetCategory="OPT" buySell="SLD" quantity="1" tradePrice="6.85" tradeDate="2026-03-21" tradeTime="13:15:00" commission="-0.65" brokerExecutionCharge="0" currency="USD" exchange="CBOE"/>
+<!-- Account: U1234567 (Main) - Scale-in stock -->
+<TradeConfirmation accountId="U1234567" acctAlias="Main" tradeID="EX007" orderID="ORD007" symbol="MSFT" underlyingSymbol="MSFT" assetCategory="STK" buySell="BOT" quantity="50" tradePrice="420.50" tradeDate="2026-03-21" tradeTime="10:00:00" commission="-0.50" brokerExecutionCharge="0" currency="USD" exchange="NASDAQ"/>
+<TradeConfirmation accountId="U1234567" acctAlias="Main" tradeID="EX008" orderID="ORD007" symbol="MSFT" underlyingSymbol="MSFT" assetCategory="STK" buySell="BOT" quantity="50" tradePrice="420.80" tradeDate="2026-03-21" tradeTime="10:00:01" commission="-0.50" brokerExecutionCharge="0" currency="USD" exchange="NASDAQ"/>
+<TradeConfirmation accountId="U1234567" acctAlias="Main" tradeID="EX009" orderID="ORD008" symbol="MSFT" underlyingSymbol="MSFT" assetCategory="STK" buySell="SLD" quantity="100" tradePrice="423.20" tradeDate="2026-03-21" tradeTime="15:30:00" commission="-1.00" brokerExecutionCharge="0" currency="USD" exchange="NASDAQ"/>
+<!-- Account: U7654321 (IRA) - Stock trade -->
+<TradeConfirmation accountId="U7654321" acctAlias="IRA" tradeID="EX010" orderID="ORD009" symbol="AMZN" underlyingSymbol="AMZN" assetCategory="STK" buySell="BOT" quantity="20" tradePrice="185.60" tradeDate="2026-03-21" tradeTime="09:35:00" commission="-1.00" brokerExecutionCharge="0" currency="USD" exchange="NASDAQ"/>
+<TradeConfirmation accountId="U7654321" acctAlias="IRA" tradeID="EX011" orderID="ORD010" symbol="AMZN" underlyingSymbol="AMZN" assetCategory="STK" buySell="SLD" quantity="20" tradePrice="188.40" tradeDate="2026-03-21" tradeTime="14:10:00" commission="-1.00" brokerExecutionCharge="0" currency="USD" exchange="NASDAQ"/>
+<!-- Account: U7654321 (IRA) - Vertical spread (call debit) -->
+<TradeConfirmation accountId="U7654321" acctAlias="IRA" tradeID="EX012" orderID="ORD011" symbol="TSLA 260404C00250000" underlyingSymbol="TSLA" assetCategory="OPT" buySell="BOT" quantity="1" tradePrice="8.20" tradeDate="2026-03-21" tradeTime="09:55:00" commission="-0.65" brokerExecutionCharge="0" currency="USD" exchange="CBOE"/>
+<TradeConfirmation accountId="U7654321" acctAlias="IRA" tradeID="EX013" orderID="ORD012" symbol="TSLA 260404C00260000" underlyingSymbol="TSLA" assetCategory="OPT" buySell="SLD" quantity="1" tradePrice="4.80" tradeDate="2026-03-21" tradeTime="09:55:05" commission="-0.65" brokerExecutionCharge="0" currency="USD" exchange="CBOE"/>
+<!-- Account: U7654321 (IRA) - Single option -->
+<TradeConfirmation accountId="U7654321" acctAlias="IRA" tradeID="EX014" orderID="ORD013" symbol="QQQ 260328C00480000" underlyingSymbol="QQQ" assetCategory="OPT" buySell="BOT" quantity="2" tradePrice="3.10" tradeDate="2026-03-21" tradeTime="10:30:00" commission="-1.30" brokerExecutionCharge="0" currency="USD" exchange="CBOE"/>
+</TradeConfirmations>
+</FlexStatement>
+</FlexStatements>
+</FlexQueryResponse>
