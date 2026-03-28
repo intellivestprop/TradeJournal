@@ -244,9 +244,14 @@ def run_import(token: str = "", query_id: str = "", xml_text: str | None = None)
         conn.commit()
         conn.close()
 
+        # Match any close fills in this import to existing open spreads
+        from reconstruction import match_close_fills_to_open_spreads
+        close_result = match_close_fills_to_open_spreads(import_id)
+
         return {
             "status": "success", "import_id": import_id,
             "fills": inserted, "total_parsed": len(fills), "raw_file": raw_path,
+            "spreads_closed": close_result.get("trades_closed", 0),
         }
 
     except Exception as e:
