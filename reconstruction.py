@@ -10,6 +10,7 @@ from collections import defaultdict
 from datetime import datetime
 
 from database import get_connection
+from option_parser import parse_ibkr_option_symbol
 
 
 def reconstruct_all_new():
@@ -167,7 +168,18 @@ def _detect_spreads(fills: list[dict]) -> tuple[list, list]:
 
 
 def _is_spread_pair(f1: dict, f2: dict) -> bool:
-    """Check if two option fills form a vertical spread."""
+    """
+    Check if two option fills form a vertical spread.
+
+    Primary checks (always applied):
+      - Same underlying symbol
+      - Opposite sides (one BUY, one SELL)
+      - Within 60 seconds of each other
+
+    Enhanced check (applied when symbols are parseable):
+      - Same expiry date  (different expiries = calendar spread, not vertical)
+      - Different strikes (same strike = not a spread)
+    """
     if f1["underlying_symbol"] != f2["underlying_symbol"]:
         return False
     if f1["side"] == f2["side"]:
@@ -179,6 +191,18 @@ def _is_spread_pair(f1: dict, f2: dict) -> bool:
             return False
     except (ValueError, TypeError):
         return False
+
+    # Enhanced matching using parsed option symbols
+    p1 = parse_ibkr_option_symbol(f1.get("symbol", ""))
+    p2 = parse_ibkr_option_symbol(f2.get("symbol", ""))
+    if p1 and p2:
+        # Must share the same expiry (vertical spread, not calendar)
+        if p1["expiry"] != p2["expiry"]:
+            return False
+        # Must have different strikes (otherwise it's not a spread)
+        if abs(p1["strike"] - p2["strike"]) < 0.001:
+            return False
+
     return True
 
 
@@ -215,13 +239,23 @@ def _create_spread_trade(conn, account_id, underlying, long_fills, short_fills):
     ))
     trade_id = cur.lastrowid
 
-    # Create trade_legs
+    # Create trade_legs — include parsed option data if available
     for i, fills in enumerate([long_fills, short_fills], 1):
         avg_price = sum(f["price"] * f["quantity"] for f in fills) / sum(f["quantity"] for f in fills)
+        parsed = parse_ibkr_option_symbol(fills[0].get("symbol", ""))
+        opt_type = parsed["option_type"] if parsed else None
+        strike   = parsed["strike"]      if parsed else None
+        expiry   = parsed["expiry"]      if parsed else None
         conn.execute("""
-            INSERT INTO trade_legs (trade_id, leg_index, side, open_price_avg, contracts)
-            VALUES (?, ?, ?, ?, ?)
-        """, (trade_id, i, fills[0]["side"], avg_price, sum(f["quantity"] for f in fills)))
+            INSERT INTO trade_legs (
+                trade_id, leg_index, side, open_price_avg, contracts,
+                option_type, strike, expiry
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            trade_id, i, fills[0]["side"], avg_price,
+            sum(f["quantity"] for f in fills),
+            opt_type, strike, expiry
+        ))
 
     # Link fills
     for f in all_fills:
