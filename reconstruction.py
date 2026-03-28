@@ -265,6 +265,11 @@ def _create_spread_trade(conn, account_id, underlying, long_fills, short_fills):
         )
 
     conn.commit()
+
+    # Populate options summary after initial creation
+    populate_options_summary(trade_id, conn)
+    conn.commit()
+
     return 1, len(all_fills)
 
 
@@ -672,12 +677,100 @@ def match_close_fills_to_open_spreads(import_id: int) -> dict:
                 )
                 new_fills_linked += result.rowcount
 
-        fills_assigned  += new_fills_linked
-        trades_closed   += 1
+        fills_assigned += new_fills_linked
+
+        # Refresh options summary with updated exit data (dte_at_exit, etc.)
+        populate_options_summary(trade_id, conn)
+
+        trades_closed += 1
 
     conn.commit()
     conn.close()
     return {"trades_closed": trades_closed, "fills_assigned": fills_assigned}
+
+
+def populate_options_summary(trade_id: int, conn) -> None:
+    """
+    Calculate and upsert trade_options_summary metrics for a spread trade.
+
+    Computes: spread_width, net_debit_credit, max_profit, max_loss, breakeven, DTE.
+    All values are per-contract (1 spread = 100 shares); multiply by contracts for totals.
+
+    Called after spread creation (direction=debit/credit, entry_price_avg set)
+    and again after closure (exit_datetime now populated → dte_at_exit updated).
+    """
+    trade_row = conn.execute("SELECT * FROM trades WHERE id = ?", (trade_id,)).fetchone()
+    if not trade_row:
+        return
+    trade = dict(trade_row)
+
+    legs = [dict(l) for l in conn.execute(
+        "SELECT * FROM trade_legs WHERE trade_id = ? ORDER BY leg_index",
+        (trade_id,)
+    ).fetchall()]
+
+    if len(legs) != 2:
+        return
+    if any(l["strike"] is None or l["expiry"] is None for l in legs):
+        return
+
+    expiry      = legs[0]["expiry"]          # Both legs share expiry (vertical spread)
+    spread_width = round(abs(legs[0]["strike"] - legs[1]["strike"]), 4)
+
+    # entry_price_avg = abs(long_avg - short_avg) = net premium per share
+    net_dc    = round(float(trade.get("entry_price_avg") or 0), 4)
+    direction = trade.get("direction", "debit")  # "debit" | "credit"
+
+    # Max profit / max loss (per 1 spread contract = 100 shares)
+    if direction == "debit":
+        max_profit = round((spread_width - net_dc) * 100, 2)
+        max_loss   = round(net_dc * 100, 2)
+    else:  # credit
+        max_profit = round(net_dc * 100, 2)
+        max_loss   = round((spread_width - net_dc) * 100, 2)
+
+    # Breakeven — determined by option type of the long leg
+    long_leg  = next((l for l in legs if l["side"] == "BUY"),  None)
+    short_leg = next((l for l in legs if l["side"] == "SELL"), None)
+    breakeven = None
+    if long_leg and short_leg:
+        opt_type      = (long_leg.get("option_type") or "").lower()
+        lower_strike  = min(long_leg["strike"], short_leg["strike"])
+        higher_strike = max(long_leg["strike"], short_leg["strike"])
+        if opt_type == "call":
+            breakeven = round(lower_strike + net_dc, 4)
+        elif opt_type == "put":
+            breakeven = round(higher_strike - net_dc, 4)
+
+    # DTE: calendar days from trade open/close date to expiry
+    dte_at_entry, dte_at_exit = None, None
+    try:
+        expiry_dt = datetime.strptime(expiry, "%Y-%m-%d").date()
+        if trade.get("entry_datetime"):
+            entry_dt     = datetime.fromisoformat(trade["entry_datetime"]).date()
+            dte_at_entry = (expiry_dt - entry_dt).days
+        if trade.get("exit_datetime"):
+            exit_dt     = datetime.fromisoformat(trade["exit_datetime"]).date()
+            dte_at_exit = (expiry_dt - exit_dt).days
+    except (ValueError, TypeError):
+        pass
+
+    conn.execute("""
+        INSERT INTO trade_options_summary (
+            trade_id, expiry, dte_at_entry, dte_at_exit,
+            net_debit_credit, spread_width, max_profit, max_loss, breakeven
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(trade_id) DO UPDATE SET
+            expiry           = excluded.expiry,
+            dte_at_entry     = excluded.dte_at_entry,
+            dte_at_exit      = excluded.dte_at_exit,
+            net_debit_credit = excluded.net_debit_credit,
+            spread_width     = excluded.spread_width,
+            max_profit       = excluded.max_profit,
+            max_loss         = excluded.max_loss,
+            breakeven        = excluded.breakeven
+    """, (trade_id, expiry, dte_at_entry, dte_at_exit,
+          net_dc, spread_width, max_profit, max_loss, breakeven))
 
 
 def _generate_trade_code(account_id: str, symbol: str, timestamp: str) -> str:
