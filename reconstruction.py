@@ -440,6 +440,246 @@ def _group_by_time(fills: list[dict]) -> list[list[dict]]:
     return groups
 
 
+def match_close_fills_to_open_spreads(import_id: int) -> dict:
+    """
+    Match option fills from this import against existing open spread trades.
+
+    Runs AFTER store_fills() so the new fills are in the DB but not yet
+    assigned to any trade.  Uses a position-level approach:
+
+      1. Parse each unassigned OPT fill to extract strike / expiry.
+      2. Build a fill pool keyed by (account, underlying, strike, expiry,
+         option_type, side).
+      3. For each open spread whose legs have parsed strike/expiry, look for
+         close fills (opposite side) for BOTH legs.
+      4. If found, close the trade: update exit price, P&L, holding time,
+         status.  Update trade_legs.close_price_avg.  Link fills via
+         trade_fills with role='close' (FIFO allocation by contract qty).
+      5. Handle partial closes: if close fills cover only some of the open
+         contracts, set partial_exit_flag=1 and leave status='open'.
+
+    Never matches across different broker accounts.
+
+    Returns:
+        {"trades_closed": int, "fills_assigned": int}
+    """
+    conn = get_connection()
+
+    # ── 1. Unassigned OPT fills from this import ─────────────────────────
+    rows = conn.execute("""
+        SELECT f.* FROM fills f
+        LEFT JOIN trade_fills tf ON f.id = tf.fill_id
+        WHERE f.import_id = ?
+          AND f.security_type = 'OPT'
+          AND tf.fill_id IS NULL
+        ORDER BY f.execution_timestamp
+    """, (import_id,)).fetchall()
+
+    if not rows:
+        conn.close()
+        return {"trades_closed": 0, "fills_assigned": 0}
+
+    # ── 2. Parse fills → close-fill pool ─────────────────────────────────
+    # Each pool bucket: list of {"fill": dict, "remaining_qty": float}
+    close_pool: dict[tuple, list[dict]] = defaultdict(list)
+
+    for row in rows:
+        f = dict(row)
+        parsed = parse_ibkr_option_symbol(f.get("symbol", ""))
+        if not parsed:
+            continue
+        key = (
+            f["broker_account_id"],
+            parsed["underlying"],
+            parsed["strike"],
+            parsed["expiry"],
+            parsed["option_type"],
+            f["side"],
+        )
+        close_pool[key].append({"fill": f, "remaining_qty": f["quantity"]})
+
+    if not close_pool:
+        conn.close()
+        return {"trades_closed": 0, "fills_assigned": 0}
+
+    # ── 3. Open spread trades with fully-parsed legs ──────────────────────
+    open_trades = conn.execute("""
+        SELECT t.* FROM trades t
+        WHERE t.trade_type = 'spread' AND t.status = 'open'
+        ORDER BY t.entry_datetime
+    """).fetchall()
+
+    _OPP = {"BUY": "SELL", "SELL": "BUY"}
+    trades_closed = 0
+    fills_assigned = 0
+
+    for trade_row in open_trades:
+        trade = dict(trade_row)
+        trade_id   = trade["id"]
+        account_id = trade["broker_account_id"]
+        underlying = trade["underlying_symbol"]
+        contracts  = trade["quantity_or_contracts"]
+
+        legs = [dict(l) for l in conn.execute(
+            "SELECT * FROM trade_legs WHERE trade_id = ? ORDER BY leg_index",
+            (trade_id,)
+        ).fetchall()]
+
+        if len(legs) != 2:
+            continue
+        if any(l["strike"] is None or l["expiry"] is None for l in legs):
+            continue
+
+        # ── 4a. Check close-fill availability for both legs ───────────────
+        leg_close: dict[int, dict] = {}   # leg_index → close info
+        can_close = True
+
+        for leg in legs:
+            ck = (account_id, underlying,
+                  leg["strike"], leg["expiry"],
+                  leg["option_type"], _OPP[leg["side"]])
+            available = [e for e in close_pool.get(ck, []) if e["remaining_qty"] > 0]
+            if not available:
+                can_close = False
+                break
+            total_avail = sum(e["remaining_qty"] for e in available)
+            leg_close[leg["leg_index"]] = {
+                "leg":        leg,
+                "close_key":  ck,
+                "entries":    available,           # pool entries (mutable)
+                "total_avail": total_avail,
+            }
+
+        if not can_close:
+            continue
+
+        # ── 4b. Determine how many contracts we can close ─────────────────
+        min_avail = min(info["total_avail"] for info in leg_close.values())
+        close_qty = min(contracts, min_avail)
+        is_partial = close_qty < contracts
+
+        # ── 4c. Consume fill pool and compute weighted-avg close prices ───
+        allocated_fills: dict[int, list[tuple[dict, float]]] = defaultdict(list)
+        # leg_index → [(fill_dict, qty_used), ...]
+
+        for leg_idx, info in leg_close.items():
+            qty_needed = close_qty
+            for entry in info["entries"]:
+                if qty_needed <= 0:
+                    break
+                take = min(entry["remaining_qty"], qty_needed)
+                allocated_fills[leg_idx].append((entry["fill"], take))
+                entry["remaining_qty"] -= take
+                qty_needed -= take
+
+        # Weighted-average close price per leg
+        leg_close_price: dict[int, float] = {}
+        for leg_idx, allocs in allocated_fills.items():
+            total_val = sum(f["price"] * qty for f, qty in allocs)
+            total_qty = sum(qty for _, qty in allocs)
+            leg_close_price[leg_idx] = total_val / total_qty if total_qty else 0.0
+
+        # ── 4d. Calculate P&L ─────────────────────────────────────────────
+        # Each leg contributes independently:
+        #   long (BUY)  leg: pnl = (close − open) × qty × 100
+        #   short (SELL) leg: pnl = (open − close) × qty × 100
+        gross_pnl = 0.0
+        close_fees = 0.0
+        exit_times: list[str] = []
+
+        for leg in legs:
+            li   = leg["leg_index"]
+            open_px  = leg["open_price_avg"]
+            close_px = leg_close_price[li]
+            if leg["side"] == "BUY":
+                gross_pnl += (close_px - open_px) * close_qty * 100
+            else:
+                gross_pnl += (open_px - close_px) * close_qty * 100
+
+            for f, qty_used in allocated_fills[li]:
+                frac = qty_used / f["quantity"] if f["quantity"] else 0
+                close_fees += (f["commission"] + f["fees"]) * frac
+                exit_times.append(f["execution_timestamp"])
+
+        exit_time = max(exit_times) if exit_times else None
+        net_pnl   = round(gross_pnl - close_fees, 2)
+        gross_pnl = round(gross_pnl, 2)
+
+        # Holding time
+        holding_minutes, holding_days, same_day = 0, 0.0, False
+        if exit_time and trade["entry_datetime"]:
+            try:
+                dt_in  = datetime.fromisoformat(trade["entry_datetime"])
+                dt_out = datetime.fromisoformat(exit_time)
+                holding_minutes = int((dt_out - dt_in).total_seconds() / 60)
+                holding_days    = round(holding_minutes / 1440, 2)
+                same_day        = dt_in.date() == dt_out.date()
+            except (ValueError, TypeError):
+                pass
+
+        # Net close premium (for exit_price_avg)
+        long_leg  = next(l for l in legs if l["side"] == "BUY")
+        short_leg = next(l for l in legs if l["side"] == "SELL")
+        close_net = (leg_close_price[long_leg["leg_index"]]
+                     - leg_close_price[short_leg["leg_index"]])
+
+        new_status = "open" if is_partial else "closed"
+        new_fees   = round((trade["total_fees"] or 0) + close_fees, 2)
+
+        # ── 4e. Persist changes ───────────────────────────────────────────
+        conn.execute("""
+            UPDATE trades SET
+                status            = ?,
+                exit_datetime     = ?,
+                exit_price_avg    = ?,
+                gross_pnl         = ?,
+                net_pnl           = ?,
+                total_fees        = ?,
+                holding_minutes   = ?,
+                holding_days      = ?,
+                same_day_trade_flag = ?,
+                partial_exit_flag = ?,
+                updated_at        = datetime('now')
+            WHERE id = ?
+        """, (
+            new_status,
+            exit_time,
+            round(abs(close_net), 4),
+            gross_pnl,
+            net_pnl,
+            new_fees,
+            holding_minutes,
+            holding_days,
+            1 if same_day else 0,
+            1 if is_partial else 0,
+            trade_id,
+        ))
+
+        # Update trade_legs with close prices
+        for leg in legs:
+            conn.execute(
+                "UPDATE trade_legs SET close_price_avg = ? WHERE id = ?",
+                (round(leg_close_price[leg["leg_index"]], 4), leg["id"])
+            )
+
+        # Link close fills to this trade (FIFO allocation)
+        new_fills_linked = 0
+        for leg_idx, allocs in allocated_fills.items():
+            for f, _ in allocs:
+                result = conn.execute(
+                    "INSERT OR IGNORE INTO trade_fills (trade_id, fill_id, role) VALUES (?, ?, 'close')",
+                    (trade_id, f["id"])
+                )
+                new_fills_linked += result.rowcount
+
+        fills_assigned  += new_fills_linked
+        trades_closed   += 1
+
+    conn.commit()
+    conn.close()
+    return {"trades_closed": trades_closed, "fills_assigned": fills_assigned}
+
+
 def _generate_trade_code(account_id: str, symbol: str, timestamp: str) -> str:
     """Generate a unique trade code."""
     raw = f"{account_id}:{symbol}:{timestamp}:{datetime.now().isoformat()}"

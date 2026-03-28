@@ -26,8 +26,8 @@ Read it before picking up any work. Update it when you start, complete, or block
 | ID | Phase | Title | Status | Assigned | Branch | Depends On |
 |----|-------|-------|--------|----------|--------|------------|
 | T1 | A | IBKR options symbol parser | DONE | DEV-01 | feature/T1-options-symbol-parser | — |
-| T2 | B | Spread close matching | OPEN | — | — | T1 |
-| T3 | C | trade_options_summary population | OPEN | — | — | T1, T2 |
+| T2 | B | Spread close matching | DONE | DEV-01 | feature/T2-spread-close-matching | T1 |
+| T3 | C | trade_options_summary population | IN PROGRESS | DEV-01 | feature/T3-options-summary | T1, T2 |
 | T4 | D | Cumulative P&L chart | OPEN | — | — | — |
 | T5 | E | TQ/TICKQ Yahoo Finance fetch | OPEN | — | — | — |
 
@@ -130,3 +130,6 @@ Auto-fetch NYSE TICK/TRIN on import if enabled in settings.
 |------|-----|------|--------|-------|
 | 2026-03-29 | DEV-01 | T1 | Started | Created TASKS.md, registered as DEV-01, created feature/T1-options-symbol-parser branch |
 | 2026-03-29 | DEV-01 | T1 | Completed | Created option_parser.py with parse_ibkr_option_symbol() + enrich_fill_with_parsed_symbol(). Updated reconstruction.py: import, enhanced _is_spread_pair() with expiry/strike checks, trade_legs INSERT now stores option_type/strike/expiry. 11/11 unit tests pass. sample_flex.xml: 14 fills, 7 trades, TSLA spread legs have strike/expiry/type. Real XML: empty (no trades on 2026-03-27), parses cleanly. |
+| 2026-03-29 | DEV-01 | T2 | Started | Created feature/T2-spread-close-matching branch. Implemented match_close_fills_to_open_spreads() in reconstruction.py. Hooked into run_import() in importer.py. |
+| 2026-03-29 | DEV-01 | T2 | Completed | match_close_fills_to_open_spreads() uses position-level FIFO fill pool keyed by (account, underlying, strike, expiry, option_type, side). Updates trades.status='closed', exit_datetime, gross_pnl, net_pnl; updates trade_legs.close_price_avg; inserts trade_fills role='close'. Partial closes supported. Two-stage test: TSLA spread opened (Day 1 sample_flex.xml), closed (Day 2 close XML) → gross_pnl=+90.00 ✓. Never matches across broker accounts. |
+| 2026-03-29 | DEV-01 | T3 | Started | Created feature/T3-options-summary branch. Implementing upsert_options_summary() in reconstruction.py. |
