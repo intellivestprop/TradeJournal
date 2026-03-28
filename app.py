@@ -190,6 +190,31 @@ with tabs[1]:
         dc[2].metric("Net P&L", f"{'+'if (trade['net_pnl'] or 0)>=0 else ''}${(trade['net_pnl'] or 0):,.2f}")
         dc[3].metric("Holding", f"{trade['holding_minutes'] or 0}m")
 
+        # Options summary (spread trades only)
+        if trade["trade_type"] == "spread":
+            opts = conn.execute(
+                "SELECT * FROM trade_options_summary WHERE trade_id = ?", (trade_id,)
+            ).fetchone()
+            if opts:
+                opts = dict(opts)
+                st.markdown("---")
+                st.caption("**Spread metrics**")
+                sc = st.columns(5)
+                sc[0].metric("Spread width", f"${opts['spread_width']:.2f}" if opts["spread_width"] else "-")
+                sc[1].metric("Net debit/credit", f"${opts['net_debit_credit']:.2f}" if opts["net_debit_credit"] else "-")
+                sc[2].metric("Max profit", f"${opts['max_profit']:.2f}" if opts["max_profit"] is not None else "-")
+                sc[3].metric("Max loss", f"${opts['max_loss']:.2f}" if opts["max_loss"] is not None else "-")
+                sc[4].metric("Breakeven", f"${opts['breakeven']:.2f}" if opts["breakeven"] else "-")
+                dte_parts = []
+                if opts.get("dte_at_entry") is not None:
+                    dte_parts.append(f"DTE at entry: **{opts['dte_at_entry']}d**")
+                if opts.get("dte_at_exit") is not None:
+                    dte_parts.append(f"DTE at exit: **{opts['dte_at_exit']}d**")
+                if opts.get("expiry"):
+                    dte_parts.append(f"Expiry: **{opts['expiry']}**")
+                if dte_parts:
+                    st.markdown("  ·  ".join(dte_parts))
+
         # TradingView chart
         st.markdown("---")
         st.caption(f"TradingView chart — {trade['underlying_symbol'] or trade['symbol']}")
