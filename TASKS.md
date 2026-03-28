@@ -28,7 +28,7 @@ Read it before picking up any work. Update it when you start, complete, or block
 | T1 | A | IBKR options symbol parser | DONE | DEV-01 | feature/T1-options-symbol-parser | — |
 | T2 | B | Spread close matching | DONE | DEV-01 | feature/T2-spread-close-matching | T1 |
 | T3 | C | trade_options_summary population | DONE | DEV-01 | feature/T3-options-summary | T1, T2 |
-| T4 | D | Cumulative P&L chart | OPEN | — | — | — |
+| T4 | D | Cumulative P&L chart | DONE | DEV-01 | feature/T4-pnl-chart | — |
 | T5 | E | TQ/TICKQ Yahoo Finance fetch | OPEN | — | — | — |
 
 ---
@@ -134,3 +134,5 @@ Auto-fetch NYSE TICK/TRIN on import if enabled in settings.
 | 2026-03-29 | DEV-01 | T2 | Completed | match_close_fills_to_open_spreads() uses position-level FIFO fill pool keyed by (account, underlying, strike, expiry, option_type, side). Updates trades.status='closed', exit_datetime, gross_pnl, net_pnl; updates trade_legs.close_price_avg; inserts trade_fills role='close'. Partial closes supported. Two-stage test: TSLA spread opened (Day 1 sample_flex.xml), closed (Day 2 close XML) → gross_pnl=+90.00 ✓. Never matches across broker accounts. |
 | 2026-03-29 | DEV-01 | T3 | Started | Created feature/T3-options-summary branch. Implementing upsert_options_summary() in reconstruction.py. |
 | 2026-03-29 | DEV-01 | T3 | Completed | Added populate_options_summary(trade_id, conn) to reconstruction.py. Hooked into _create_spread_trade() and match_close_fills_to_open_spreads(). Calculates spread_width, net_debit_credit, max_profit, max_loss, breakeven, dte_at_entry, dte_at_exit. Spread metrics panel added to Trade Detail tab in app.py. Verified: sample_flex.xml → TSLA width=10, max_p=660, be=253.40 ✓; real XML → 46 spreads all get summary rows ✓. |
+| 2026-03-29 | DEV-01 | T4 | Started | Created feature/T4-pnl-chart branch. Adding cumulative P&L chart to Statistics tab. |
+| 2026-03-29 | DEV-01 | T4 | Completed | Added Plotly cumulative P&L line chart to Statistics tab (app.py). Green/red fill based on final value. Account filter added to statistics tab. Falls back to st.line_chart if plotly not installed. Added plotly>=5.18.0 to requirements.txt. Verified with real XML: 87 closed trades, chart renders correctly. |
