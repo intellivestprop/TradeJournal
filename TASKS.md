@@ -13,6 +13,20 @@ Read it before picking up any work. Update it when you start, complete, or block
 
 ---
 
+## Task Numbering Note
+
+Task IDs in this file follow the build order from `docs/HANDOFF.md` Section 11, not the priority order from Section 3:
+
+| TASKS.md ID | HANDOFF.md Priority | Title |
+|-------------|-------------------|-------|
+| T1 | Priority 2 | IBKR options symbol parser |
+| T2 | Priority 1 | Spread close matching |
+| T3 | Priority 3 | trade_options_summary population |
+| T4 | Priority 4 | Cumulative P&L chart |
+| T5 | Priority 5 | TQ/TICKQ Yahoo Finance fetch |
+
+---
+
 ## Task Board
 
 ### Status Key
