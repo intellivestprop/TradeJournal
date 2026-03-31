@@ -136,3 +136,25 @@ Auto-fetch NYSE TICK/TRIN on import if enabled in settings.
 | 2026-03-29 | DEV-01 | T3 | Completed | Added populate_options_summary(trade_id, conn) to reconstruction.py. Hooked into _create_spread_trade() and match_close_fills_to_open_spreads(). Calculates spread_width, net_debit_credit, max_profit, max_loss, breakeven, dte_at_entry, dte_at_exit. Spread metrics panel added to Trade Detail tab in app.py. Verified: sample_flex.xml → TSLA width=10, max_p=660, be=253.40 ✓; real XML → 46 spreads all get summary rows ✓. |
 | 2026-03-29 | DEV-01 | T4 | Started | Created feature/T4-pnl-chart branch. Adding cumulative P&L chart to Statistics tab. |
 | 2026-03-29 | DEV-01 | T4 | Completed | Added Plotly cumulative P&L line chart to Statistics tab (app.py). Green/red fill based on final value. Account filter added to statistics tab. Falls back to st.line_chart if plotly not installed. Added plotly>=5.18.0 to requirements.txt. Verified with real XML: 87 closed trades, chart renders correctly. |
+| 2026-03-31 | L7-Kelly | V1 | End-to-end verification | **8/8 PASS** against v1.2 spec using sample_flex.xml. Details below. |
+
+---
+
+## End-to-End Verification Log (2026-03-31)
+
+**Verifier:** L7 Inc (Kelly, CEO)
+**Data source:** sample_flex.xml (real IBKR XML not available in workspace)
+**Branch:** chore/verification-log
+
+| # | Check | Result | Evidence |
+|---|-------|--------|----------|
+| 1 | Import runs cleanly | **PASS** | `import_from_file('sample_flex.xml')` returned success. 14 fills parsed, 7 trades reconstructed, 0 errors. |
+| 2 | No duplicate fills on re-import | **PASS** | Re-importing same file kept fill count at 14. Dedup works via unique index on `imports.checksum`. Note: second import hits UNIQUE constraint rather than graceful "duplicate" path — functionally correct, minor UX issue. |
+| 3 | Trade reconstruction | **PASS** | 4 stock trades (AAPL, NVDA, MSFT, AMZN), 2 single-leg options (SPY put, QQQ call), 1 vertical spread (TSLA 250/260 call debit). Accounts U1234567 and U7654321 never merged. Spread has 2 legs with correct strikes, expiry, option types. |
+| 4 | trade_options_summary | **PASS** | TSLA spread: spread_width=10.0, max_profit=660.0, max_loss=340.0, breakeven=253.4, net_debit_credit=3.4, dte_at_entry=14. Mathematically correct. |
+| 5 | TradingView chart | **PASS** | `tradingview_embed()` at app.py:81-89 using Advanced Chart widget. Called in Trade Detail with underlying symbol. Dark theme, daily interval. |
+| 6 | Manual review (all blank) | **PASS** | Review inserted with all optional fields NULL. No NOT NULL constraints except trade_id. Form passes None for empty values. |
+| 7 | Cumulative P&L chart | **PASS** | Statistics tab (app.py:347-486) renders cumulative net P&L with Plotly. Account filter dropdown. Green/red coloring. Zero-line reference. Fallback to st.line_chart. |
+| 8 | Backup and CSV export | **PASS** | backup_database() created timestamped .db copy. export_trades_csv() produced 7 trade rows with 42 columns including joined review fields. |
+
+**Non-blocking observation:** Check 2 — re-import triggers UNIQUE constraint error on imports.checksum rather than the clean is_duplicate() "duplicate" code path. Dedup still works (no duplicate fills), but error message is less informative. Recommend addressing in Phase 2.
