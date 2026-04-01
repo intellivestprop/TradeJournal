@@ -190,6 +190,31 @@ with tabs[1]:
         dc[2].metric("Net P&L", f"{'+'if (trade['net_pnl'] or 0)>=0 else ''}${(trade['net_pnl'] or 0):,.2f}")
         dc[3].metric("Holding", f"{trade['holding_minutes'] or 0}m")
 
+        # Options summary (spread trades only)
+        if trade["trade_type"] == "spread":
+            opts = conn.execute(
+                "SELECT * FROM trade_options_summary WHERE trade_id = ?", (trade_id,)
+            ).fetchone()
+            if opts:
+                opts = dict(opts)
+                st.markdown("---")
+                st.caption("**Spread metrics**")
+                sc = st.columns(5)
+                sc[0].metric("Spread width", f"${opts['spread_width']:.2f}" if opts["spread_width"] else "-")
+                sc[1].metric("Net debit/credit", f"${opts['net_debit_credit']:.2f}" if opts["net_debit_credit"] else "-")
+                sc[2].metric("Max profit", f"${opts['max_profit']:.2f}" if opts["max_profit"] is not None else "-")
+                sc[3].metric("Max loss", f"${opts['max_loss']:.2f}" if opts["max_loss"] is not None else "-")
+                sc[4].metric("Breakeven", f"${opts['breakeven']:.2f}" if opts["breakeven"] else "-")
+                dte_parts = []
+                if opts.get("dte_at_entry") is not None:
+                    dte_parts.append(f"DTE at entry: **{opts['dte_at_entry']}d**")
+                if opts.get("dte_at_exit") is not None:
+                    dte_parts.append(f"DTE at exit: **{opts['dte_at_exit']}d**")
+                if opts.get("expiry"):
+                    dte_parts.append(f"Expiry: **{opts['expiry']}**")
+                if dte_parts:
+                    st.markdown("  ·  ".join(dte_parts))
+
         # TradingView chart
         st.markdown("---")
         st.caption(f"TradingView chart — {trade['underlying_symbol'] or trade['symbol']}")
@@ -321,7 +346,26 @@ with tabs[2]:
 # ═══ TAB 4: STATISTICS ═══
 with tabs[3]:
     conn = get_connection()
-    stats = conn.execute("SELECT * FROM trades WHERE status = 'closed'").fetchall()
+
+    # Account filter
+    acct_rows_s = conn.execute("SELECT broker_account_id, alias FROM accounts ORDER BY broker_account_id").fetchall()
+    acct_opts_s = {"All accounts": None}
+    for a in acct_rows_s:
+        label = a["alias"] or a["broker_account_id"]
+        acct_opts_s[label] = a["broker_account_id"]
+    sel_acct_s = st.selectbox("Account", list(acct_opts_s.keys()), key="stat_acct")
+    acct_filter_s = acct_opts_s[sel_acct_s]
+
+    where_s = ["status = 'closed'"]
+    params_s: list = []
+    if acct_filter_s:
+        where_s.append("broker_account_id = ?")
+        params_s.append(acct_filter_s)
+
+    stats = conn.execute(
+        f"SELECT * FROM trades WHERE {' AND '.join(where_s)} ORDER BY exit_datetime",
+        params_s
+    ).fetchall()
 
     if not stats:
         st.info("No closed trades yet.")
@@ -375,6 +419,69 @@ with tabs[3]:
                     su_wins = len([t for t in su_trades if (t["net_pnl"] or 0) > 0])
                     su_pnl = sum(t["net_pnl"] or 0 for t in su_trades)
                     st.write(f"**{su}**: {len(su_trades)} trades | {su_wins/len(su_trades)*100:.0f}% win | {pnl_html(su_pnl)}", unsafe_allow_html=True)
+
+        # ── Cumulative P&L chart ──────────────────────────────────────────
+        st.markdown("---")
+        st.subheader("Cumulative Net P&L")
+
+        # Build (date, cumulative_pnl) series sorted by exit date
+        cum_points: list[tuple[str, float]] = []
+        running = 0.0
+        for t in stats:   # already sorted by exit_datetime ASC
+            if not t["exit_datetime"] or t["net_pnl"] is None:
+                continue
+            running += t["net_pnl"]
+            date_str = t["exit_datetime"][:10]   # YYYY-MM-DD
+            cum_points.append((date_str, round(running, 2)))
+
+        if cum_points:
+            try:
+                import plotly.graph_objects as go  # type: ignore
+                dates = [p[0] for p in cum_points]
+                values = [p[1] for p in cum_points]
+                line_color = "#3fb950" if values[-1] >= 0 else "#f85149"
+                fill_color = "rgba(63,185,80,0.12)" if values[-1] >= 0 else "rgba(248,81,73,0.12)"
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=dates,
+                    y=values,
+                    mode="lines",
+                    line=dict(color=line_color, width=2),
+                    fill="tozeroy",
+                    fillcolor=fill_color,
+                    hovertemplate="%{x}<br><b>$%{y:,.2f}</b><extra></extra>",
+                ))
+                fig.add_hline(y=0, line_dash="dot", line_color="rgba(255,255,255,0.2)", line_width=1)
+                fig.update_layout(
+                    paper_bgcolor="#0d1117",
+                    plot_bgcolor="#0d1117",
+                    margin=dict(l=0, r=0, t=10, b=0),
+                    height=280,
+                    xaxis=dict(
+                        showgrid=False,
+                        tickfont=dict(color="#8b949e", size=11),
+                        color="#8b949e",
+                    ),
+                    yaxis=dict(
+                        showgrid=True,
+                        gridcolor="rgba(255,255,255,0.06)",
+                        tickprefix="$",
+                        tickfont=dict(color="#8b949e", size=11),
+                        color="#8b949e",
+                        zeroline=False,
+                    ),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            except ImportError:
+                # Fallback to native st.line_chart if plotly not installed
+                chart_data: dict[str, list] = {"Date": [], "Cumulative P&L ($)": []}
+                for date_str, val in cum_points:
+                    chart_data["Date"].append(date_str)
+                    chart_data["Cumulative P&L ($)"].append(val)
+                st.line_chart(chart_data, x="Date", y="Cumulative P&L ($)")
+        else:
+            st.caption("No trades with exit dates to chart.")
 
     conn.close()
 

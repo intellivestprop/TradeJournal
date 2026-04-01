@@ -127,7 +127,15 @@ def parse_flex_xml(xml_text: str) -> list[dict]:
 
 
 def _normalize_timestamp(date_str: str, time_str: str) -> str:
-    """Combine date and time strings into ISO format."""
+    """
+    Combine date and time strings into ISO format.
+
+    Handles multiple IBKR time formats:
+      - "HH:MM:SS"         (TradeConfirmation reports)
+      - "HHMMSS"           (6-digit compact)
+      - "YYYYMMDD:HHMMSS"  (Activity/Trade reports — date prefix must be stripped)
+      - "YYYYMMDD;HHMMSS"  (same with semicolon separator)
+    """
     if not date_str:
         return datetime.now().isoformat()
 
@@ -137,6 +145,10 @@ def _normalize_timestamp(date_str: str, time_str: str) -> str:
 
     if time_str:
         time_str = time_str.replace(";", ":")
+        # IBKR Activity format: "YYYYMMDD:HHMMSS" — strip the date prefix
+        if len(time_str) == 15 and time_str[8] == ":":
+            time_str = time_str[9:]   # "145842"
+        # Compact 6-digit time: "HHMMSS" -> "HH:MM:SS"
         if len(time_str) == 6 and ":" not in time_str:
             time_str = f"{time_str[:2]}:{time_str[2:4]}:{time_str[4:]}"
         return f"{date_str}T{time_str}"
@@ -232,9 +244,14 @@ def run_import(token: str = "", query_id: str = "", xml_text: str | None = None)
         conn.commit()
         conn.close()
 
+        # Match any close fills in this import to existing open spreads
+        from reconstruction import match_close_fills_to_open_spreads
+        close_result = match_close_fills_to_open_spreads(import_id)
+
         return {
             "status": "success", "import_id": import_id,
             "fills": inserted, "total_parsed": len(fills), "raw_file": raw_path,
+            "spreads_closed": close_result.get("trades_closed", 0),
         }
 
     except Exception as e:

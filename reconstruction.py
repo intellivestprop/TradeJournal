@@ -10,6 +10,7 @@ from collections import defaultdict
 from datetime import datetime
 
 from database import get_connection
+from option_parser import parse_ibkr_option_symbol
 
 
 def reconstruct_all_new():
@@ -167,7 +168,18 @@ def _detect_spreads(fills: list[dict]) -> tuple[list, list]:
 
 
 def _is_spread_pair(f1: dict, f2: dict) -> bool:
-    """Check if two option fills form a vertical spread."""
+    """
+    Check if two option fills form a vertical spread.
+
+    Primary checks (always applied):
+      - Same underlying symbol
+      - Opposite sides (one BUY, one SELL)
+      - Within 60 seconds of each other
+
+    Enhanced check (applied when symbols are parseable):
+      - Same expiry date  (different expiries = calendar spread, not vertical)
+      - Different strikes (same strike = not a spread)
+    """
     if f1["underlying_symbol"] != f2["underlying_symbol"]:
         return False
     if f1["side"] == f2["side"]:
@@ -179,6 +191,18 @@ def _is_spread_pair(f1: dict, f2: dict) -> bool:
             return False
     except (ValueError, TypeError):
         return False
+
+    # Enhanced matching using parsed option symbols
+    p1 = parse_ibkr_option_symbol(f1.get("symbol", ""))
+    p2 = parse_ibkr_option_symbol(f2.get("symbol", ""))
+    if p1 and p2:
+        # Must share the same expiry (vertical spread, not calendar)
+        if p1["expiry"] != p2["expiry"]:
+            return False
+        # Must have different strikes (otherwise it's not a spread)
+        if abs(p1["strike"] - p2["strike"]) < 0.001:
+            return False
+
     return True
 
 
@@ -215,13 +239,23 @@ def _create_spread_trade(conn, account_id, underlying, long_fills, short_fills):
     ))
     trade_id = cur.lastrowid
 
-    # Create trade_legs
+    # Create trade_legs — include parsed option data if available
     for i, fills in enumerate([long_fills, short_fills], 1):
         avg_price = sum(f["price"] * f["quantity"] for f in fills) / sum(f["quantity"] for f in fills)
+        parsed = parse_ibkr_option_symbol(fills[0].get("symbol", ""))
+        opt_type = parsed["option_type"] if parsed else None
+        strike   = parsed["strike"]      if parsed else None
+        expiry   = parsed["expiry"]      if parsed else None
         conn.execute("""
-            INSERT INTO trade_legs (trade_id, leg_index, side, open_price_avg, contracts)
-            VALUES (?, ?, ?, ?, ?)
-        """, (trade_id, i, fills[0]["side"], avg_price, sum(f["quantity"] for f in fills)))
+            INSERT INTO trade_legs (
+                trade_id, leg_index, side, open_price_avg, contracts,
+                option_type, strike, expiry
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            trade_id, i, fills[0]["side"], avg_price,
+            sum(f["quantity"] for f in fills),
+            opt_type, strike, expiry
+        ))
 
     # Link fills
     for f in all_fills:
@@ -231,6 +265,11 @@ def _create_spread_trade(conn, account_id, underlying, long_fills, short_fills):
         )
 
     conn.commit()
+
+    # Populate options summary after initial creation
+    populate_options_summary(trade_id, conn)
+    conn.commit()
+
     return 1, len(all_fills)
 
 
@@ -404,6 +443,334 @@ def _group_by_time(fills: list[dict]) -> list[list[dict]]:
             current = [curr]
     groups.append(current)
     return groups
+
+
+def match_close_fills_to_open_spreads(import_id: int) -> dict:
+    """
+    Match option fills from this import against existing open spread trades.
+
+    Runs AFTER store_fills() so the new fills are in the DB but not yet
+    assigned to any trade.  Uses a position-level approach:
+
+      1. Parse each unassigned OPT fill to extract strike / expiry.
+      2. Build a fill pool keyed by (account, underlying, strike, expiry,
+         option_type, side).
+      3. For each open spread whose legs have parsed strike/expiry, look for
+         close fills (opposite side) for BOTH legs.
+      4. If found, close the trade: update exit price, P&L, holding time,
+         status.  Update trade_legs.close_price_avg.  Link fills via
+         trade_fills with role='close' (FIFO allocation by contract qty).
+      5. Handle partial closes: if close fills cover only some of the open
+         contracts, set partial_exit_flag=1 and leave status='open'.
+
+    Never matches across different broker accounts.
+
+    Returns:
+        {"trades_closed": int, "fills_assigned": int}
+    """
+    conn = get_connection()
+
+    # ── 1. Unassigned OPT fills from this import ─────────────────────────
+    rows = conn.execute("""
+        SELECT f.* FROM fills f
+        LEFT JOIN trade_fills tf ON f.id = tf.fill_id
+        WHERE f.import_id = ?
+          AND f.security_type = 'OPT'
+          AND tf.fill_id IS NULL
+        ORDER BY f.execution_timestamp
+    """, (import_id,)).fetchall()
+
+    if not rows:
+        conn.close()
+        return {"trades_closed": 0, "fills_assigned": 0}
+
+    # ── 2. Parse fills → close-fill pool ─────────────────────────────────
+    # Each pool bucket: list of {"fill": dict, "remaining_qty": float}
+    close_pool: dict[tuple, list[dict]] = defaultdict(list)
+
+    for row in rows:
+        f = dict(row)
+        parsed = parse_ibkr_option_symbol(f.get("symbol", ""))
+        if not parsed:
+            continue
+        key = (
+            f["broker_account_id"],
+            parsed["underlying"],
+            parsed["strike"],
+            parsed["expiry"],
+            parsed["option_type"],
+            f["side"],
+        )
+        close_pool[key].append({"fill": f, "remaining_qty": f["quantity"]})
+
+    if not close_pool:
+        conn.close()
+        return {"trades_closed": 0, "fills_assigned": 0}
+
+    # ── 3. Open spread trades with fully-parsed legs ──────────────────────
+    open_trades = conn.execute("""
+        SELECT t.* FROM trades t
+        WHERE t.trade_type = 'spread' AND t.status = 'open'
+        ORDER BY t.entry_datetime
+    """).fetchall()
+
+    _OPP = {"BUY": "SELL", "SELL": "BUY"}
+    trades_closed = 0
+    fills_assigned = 0
+
+    for trade_row in open_trades:
+        trade = dict(trade_row)
+        trade_id   = trade["id"]
+        account_id = trade["broker_account_id"]
+        underlying = trade["underlying_symbol"]
+        contracts  = trade["quantity_or_contracts"]
+
+        legs = [dict(l) for l in conn.execute(
+            "SELECT * FROM trade_legs WHERE trade_id = ? ORDER BY leg_index",
+            (trade_id,)
+        ).fetchall()]
+
+        if len(legs) != 2:
+            continue
+        if any(l["strike"] is None or l["expiry"] is None for l in legs):
+            continue
+
+        # ── 4a. Check close-fill availability for both legs ───────────────
+        leg_close: dict[int, dict] = {}   # leg_index → close info
+        can_close = True
+
+        for leg in legs:
+            ck = (account_id, underlying,
+                  leg["strike"], leg["expiry"],
+                  leg["option_type"], _OPP[leg["side"]])
+            available = [e for e in close_pool.get(ck, []) if e["remaining_qty"] > 0]
+            if not available:
+                can_close = False
+                break
+            total_avail = sum(e["remaining_qty"] for e in available)
+            leg_close[leg["leg_index"]] = {
+                "leg":        leg,
+                "close_key":  ck,
+                "entries":    available,           # pool entries (mutable)
+                "total_avail": total_avail,
+            }
+
+        if not can_close:
+            continue
+
+        # ── 4b. Determine how many contracts we can close ─────────────────
+        min_avail = min(info["total_avail"] for info in leg_close.values())
+        close_qty = min(contracts, min_avail)
+        is_partial = close_qty < contracts
+
+        # ── 4c. Consume fill pool and compute weighted-avg close prices ───
+        allocated_fills: dict[int, list[tuple[dict, float]]] = defaultdict(list)
+        # leg_index → [(fill_dict, qty_used), ...]
+
+        for leg_idx, info in leg_close.items():
+            qty_needed = close_qty
+            for entry in info["entries"]:
+                if qty_needed <= 0:
+                    break
+                take = min(entry["remaining_qty"], qty_needed)
+                allocated_fills[leg_idx].append((entry["fill"], take))
+                entry["remaining_qty"] -= take
+                qty_needed -= take
+
+        # Weighted-average close price per leg
+        leg_close_price: dict[int, float] = {}
+        for leg_idx, allocs in allocated_fills.items():
+            total_val = sum(f["price"] * qty for f, qty in allocs)
+            total_qty = sum(qty for _, qty in allocs)
+            leg_close_price[leg_idx] = total_val / total_qty if total_qty else 0.0
+
+        # ── 4d. Calculate P&L ─────────────────────────────────────────────
+        # Each leg contributes independently:
+        #   long (BUY)  leg: pnl = (close − open) × qty × 100
+        #   short (SELL) leg: pnl = (open − close) × qty × 100
+        gross_pnl = 0.0
+        close_fees = 0.0
+        exit_times: list[str] = []
+
+        for leg in legs:
+            li   = leg["leg_index"]
+            open_px  = leg["open_price_avg"]
+            close_px = leg_close_price[li]
+            if leg["side"] == "BUY":
+                gross_pnl += (close_px - open_px) * close_qty * 100
+            else:
+                gross_pnl += (open_px - close_px) * close_qty * 100
+
+            for f, qty_used in allocated_fills[li]:
+                frac = qty_used / f["quantity"] if f["quantity"] else 0
+                close_fees += (f["commission"] + f["fees"]) * frac
+                exit_times.append(f["execution_timestamp"])
+
+        exit_time = max(exit_times) if exit_times else None
+        net_pnl   = round(gross_pnl - close_fees, 2)
+        gross_pnl = round(gross_pnl, 2)
+
+        # Holding time
+        holding_minutes, holding_days, same_day = 0, 0.0, False
+        if exit_time and trade["entry_datetime"]:
+            try:
+                dt_in  = datetime.fromisoformat(trade["entry_datetime"])
+                dt_out = datetime.fromisoformat(exit_time)
+                holding_minutes = int((dt_out - dt_in).total_seconds() / 60)
+                holding_days    = round(holding_minutes / 1440, 2)
+                same_day        = dt_in.date() == dt_out.date()
+            except (ValueError, TypeError):
+                pass
+
+        # Net close premium (for exit_price_avg)
+        long_leg  = next(l for l in legs if l["side"] == "BUY")
+        short_leg = next(l for l in legs if l["side"] == "SELL")
+        close_net = (leg_close_price[long_leg["leg_index"]]
+                     - leg_close_price[short_leg["leg_index"]])
+
+        new_status = "open" if is_partial else "closed"
+        new_fees   = round((trade["total_fees"] or 0) + close_fees, 2)
+
+        # ── 4e. Persist changes ───────────────────────────────────────────
+        conn.execute("""
+            UPDATE trades SET
+                status            = ?,
+                exit_datetime     = ?,
+                exit_price_avg    = ?,
+                gross_pnl         = ?,
+                net_pnl           = ?,
+                total_fees        = ?,
+                holding_minutes   = ?,
+                holding_days      = ?,
+                same_day_trade_flag = ?,
+                partial_exit_flag = ?,
+                updated_at        = datetime('now')
+            WHERE id = ?
+        """, (
+            new_status,
+            exit_time,
+            round(abs(close_net), 4),
+            gross_pnl,
+            net_pnl,
+            new_fees,
+            holding_minutes,
+            holding_days,
+            1 if same_day else 0,
+            1 if is_partial else 0,
+            trade_id,
+        ))
+
+        # Update trade_legs with close prices
+        for leg in legs:
+            conn.execute(
+                "UPDATE trade_legs SET close_price_avg = ? WHERE id = ?",
+                (round(leg_close_price[leg["leg_index"]], 4), leg["id"])
+            )
+
+        # Link close fills to this trade (FIFO allocation)
+        new_fills_linked = 0
+        for leg_idx, allocs in allocated_fills.items():
+            for f, _ in allocs:
+                result = conn.execute(
+                    "INSERT OR IGNORE INTO trade_fills (trade_id, fill_id, role) VALUES (?, ?, 'close')",
+                    (trade_id, f["id"])
+                )
+                new_fills_linked += result.rowcount
+
+        fills_assigned += new_fills_linked
+
+        # Refresh options summary with updated exit data (dte_at_exit, etc.)
+        populate_options_summary(trade_id, conn)
+
+        trades_closed += 1
+
+    conn.commit()
+    conn.close()
+    return {"trades_closed": trades_closed, "fills_assigned": fills_assigned}
+
+
+def populate_options_summary(trade_id: int, conn) -> None:
+    """
+    Calculate and upsert trade_options_summary metrics for a spread trade.
+
+    Computes: spread_width, net_debit_credit, max_profit, max_loss, breakeven, DTE.
+    All values are per-contract (1 spread = 100 shares); multiply by contracts for totals.
+
+    Called after spread creation (direction=debit/credit, entry_price_avg set)
+    and again after closure (exit_datetime now populated → dte_at_exit updated).
+    """
+    trade_row = conn.execute("SELECT * FROM trades WHERE id = ?", (trade_id,)).fetchone()
+    if not trade_row:
+        return
+    trade = dict(trade_row)
+
+    legs = [dict(l) for l in conn.execute(
+        "SELECT * FROM trade_legs WHERE trade_id = ? ORDER BY leg_index",
+        (trade_id,)
+    ).fetchall()]
+
+    if len(legs) != 2:
+        return
+    if any(l["strike"] is None or l["expiry"] is None for l in legs):
+        return
+
+    expiry      = legs[0]["expiry"]          # Both legs share expiry (vertical spread)
+    spread_width = round(abs(legs[0]["strike"] - legs[1]["strike"]), 4)
+
+    # entry_price_avg = abs(long_avg - short_avg) = net premium per share
+    net_dc    = round(float(trade.get("entry_price_avg") or 0), 4)
+    direction = trade.get("direction", "debit")  # "debit" | "credit"
+
+    # Max profit / max loss (per 1 spread contract = 100 shares)
+    if direction == "debit":
+        max_profit = round((spread_width - net_dc) * 100, 2)
+        max_loss   = round(net_dc * 100, 2)
+    else:  # credit
+        max_profit = round(net_dc * 100, 2)
+        max_loss   = round((spread_width - net_dc) * 100, 2)
+
+    # Breakeven — determined by option type of the long leg
+    long_leg  = next((l for l in legs if l["side"] == "BUY"),  None)
+    short_leg = next((l for l in legs if l["side"] == "SELL"), None)
+    breakeven = None
+    if long_leg and short_leg:
+        opt_type      = (long_leg.get("option_type") or "").lower()
+        lower_strike  = min(long_leg["strike"], short_leg["strike"])
+        higher_strike = max(long_leg["strike"], short_leg["strike"])
+        if opt_type == "call":
+            breakeven = round(lower_strike + net_dc, 4)
+        elif opt_type == "put":
+            breakeven = round(higher_strike - net_dc, 4)
+
+    # DTE: calendar days from trade open/close date to expiry
+    dte_at_entry, dte_at_exit = None, None
+    try:
+        expiry_dt = datetime.strptime(expiry, "%Y-%m-%d").date()
+        if trade.get("entry_datetime"):
+            entry_dt     = datetime.fromisoformat(trade["entry_datetime"]).date()
+            dte_at_entry = (expiry_dt - entry_dt).days
+        if trade.get("exit_datetime"):
+            exit_dt     = datetime.fromisoformat(trade["exit_datetime"]).date()
+            dte_at_exit = (expiry_dt - exit_dt).days
+    except (ValueError, TypeError):
+        pass
+
+    conn.execute("""
+        INSERT INTO trade_options_summary (
+            trade_id, expiry, dte_at_entry, dte_at_exit,
+            net_debit_credit, spread_width, max_profit, max_loss, breakeven
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(trade_id) DO UPDATE SET
+            expiry           = excluded.expiry,
+            dte_at_entry     = excluded.dte_at_entry,
+            dte_at_exit      = excluded.dte_at_exit,
+            net_debit_credit = excluded.net_debit_credit,
+            spread_width     = excluded.spread_width,
+            max_profit       = excluded.max_profit,
+            max_loss         = excluded.max_loss,
+            breakeven        = excluded.breakeven
+    """, (trade_id, expiry, dte_at_entry, dte_at_exit,
+          net_dc, spread_width, max_profit, max_loss, breakeven))
 
 
 def _generate_trade_code(account_id: str, symbol: str, timestamp: str) -> str:
