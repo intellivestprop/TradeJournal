@@ -78,6 +78,16 @@ def pnl_html(val):
     sign = "+" if val >= 0 else ""
     return f'<span class="{cls}">{sign}${val:,.2f}</span>'
 
+def row_get(row, key, default=None):
+    if row is None:
+        return default
+    if isinstance(row, dict):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return default
+
 def tradingview_embed(symbol, height=400):
     clean = symbol.split(" ")[0] if " " in symbol else symbol
     html = f'''<div style="height:{height}px">
@@ -206,11 +216,11 @@ with tabs[1]:
                 sc[3].metric("Max loss", f"${opts['max_loss']:.2f}" if opts["max_loss"] is not None else "-")
                 sc[4].metric("Breakeven", f"${opts['breakeven']:.2f}" if opts["breakeven"] else "-")
                 dte_parts = []
-                if opts.get("dte_at_entry") is not None:
+                if row_get(opts, "dte_at_entry") is not None:
                     dte_parts.append(f"DTE at entry: **{opts['dte_at_entry']}d**")
-                if opts.get("dte_at_exit") is not None:
+                if row_get(opts, "dte_at_exit") is not None:
                     dte_parts.append(f"DTE at exit: **{opts['dte_at_exit']}d**")
-                if opts.get("expiry"):
+                if row_get(opts, "expiry"):
                     dte_parts.append(f"Expiry: **{opts['expiry']}**")
                 if dte_parts:
                     st.markdown("  ·  ".join(dte_parts))
@@ -411,10 +421,10 @@ with tabs[3]:
             st.caption("BY SETUP TYPE")
             setup_types_used = set()
             for t in stats:
-                if t.get("setup_type"):
+                if row_get(t, "setup_type"):
                     setup_types_used.add(t["setup_type"])
             for su in sorted(setup_types_used):
-                su_trades = [t for t in stats if t.get("setup_type") == su]
+                su_trades = [t for t in stats if row_get(t, "setup_type") == su]
                 if su_trades:
                     su_wins = len([t for t in su_trades if (t["net_pnl"] or 0) > 0])
                     su_pnl = sum(t["net_pnl"] or 0 for t in su_trades)
