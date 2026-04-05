@@ -11,6 +11,34 @@ streamlit run app.py
 
 Upload `sample_flex.xml` in the Settings tab to see trades populate immediately.
 
+For scheduler-driven daily runs, use the batch driver:
+
+```bash
+python daily_driver.py --xml-file sample_flex.xml --report-date 2026-03-21
+```
+
+Or fetch directly from IBKR Flex:
+
+```bash
+python daily_driver.py --token "$TJ_IBKR_TOKEN" --query-id "$TJ_IBKR_QUERY_ID"
+```
+
+Useful overrides:
+
+- `--db-path` or `TJ_DB_PATH`
+- `--raw-dir` or `TJ_RAW_DIR`
+- `--statement-xml` for a separate Open Positions XML
+- `--reset-derived` to drop and recreate derived tables/views before rebuilding them
+- `--report-date` when the XML does not carry the intended reconciliation date
+
+Schema-only maintenance:
+
+```bash
+python database.py --rebuild-derived
+```
+
+That command reapplies the tracked schema, drops the derived layer (`pos_eod_from_trades`, `position_reconciliation`, `opt_strategy*`, `opt_campaign*`, and reporting views), and recreates it empty so the batch pipeline can rebuild from raw imports.
+
 ## Features
 
 - **IBKR Flex Import** — Fetches daily trade data via Flex Web Service or manual XML upload
@@ -51,3 +79,7 @@ Upload `sample_flex.xml` in the Settings tab to see trades populate immediately.
 ## Documentation
 
 See `docs/HANDOFF.md` for the full developer handoff specification including schema, architecture, known limitations, and continuation guide.
+
+See `docs/PHASE2_ARCHITECTURE.md` for the implemented Phase 2 module inventory, data flow, design decisions, and dependency map.
+
+See `docs/DEMO_PREP.md` for the verified demo/deployment runbook, walkthrough order, and currently known rough edges.

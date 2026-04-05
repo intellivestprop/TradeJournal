@@ -102,8 +102,15 @@ def parse_flex_xml(xml_text: str) -> list[dict]:
             fill = {
                 "broker_account_id": el.get("accountId", ""),
                 "broker_account_name": el.get("acctAlias", ""),
+                "conid": el.get("conid") or el.get("conID") or el.get("contractID", ""),
                 "broker_execution_id": el.get("tradeID") or el.get("transactionID") or el.get("execID", ""),
                 "broker_order_id": el.get("orderID", ""),
+                "order_reference": (
+                    el.get("orderReference")
+                    or el.get("orderRef")
+                    or el.get("ibOrderReference")
+                    or ""
+                ),
                 "symbol": el.get("symbol", ""),
                 "underlying_symbol": el.get("underlyingSymbol") or el.get("symbol", ""),
                 "security_type": el.get("assetCategory", "STK"),
@@ -166,13 +173,13 @@ def store_fills(fills: list[dict], import_id: int) -> int:
             conn.execute("""
                 INSERT INTO fills (
                     import_id, broker_account_id, broker_account_name,
-                    broker_execution_id, broker_order_id, symbol, underlying_symbol,
+                    conid, broker_execution_id, broker_order_id, order_reference, symbol, underlying_symbol,
                     security_type, side, quantity, price, execution_timestamp,
                     commission, fees, currency, exchange, raw_payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 import_id, fill["broker_account_id"], fill["broker_account_name"],
-                fill["broker_execution_id"], fill["broker_order_id"],
+                fill["conid"], fill["broker_execution_id"], fill["broker_order_id"], fill["order_reference"],
                 fill["symbol"], fill["underlying_symbol"], fill["security_type"],
                 fill["side"], fill["quantity"], fill["price"],
                 fill["execution_timestamp"], fill["commission"], fill["fees"],
@@ -223,13 +230,41 @@ def run_import(token: str = "", query_id: str = "", xml_text: str | None = None)
         checksum = compute_checksum(xml_text)
 
         if is_duplicate(checksum):
+            existing = conn.execute(
+                """
+                SELECT id, raw_file_path
+                FROM imports
+                WHERE checksum = ? AND status = 'success'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (checksum,),
+            ).fetchone()
             conn.execute(
-                "UPDATE imports SET status = ?, error_message = ?, import_finished_at = ?, checksum = ? WHERE id = ?",
-                ("duplicate", "Report already imported", datetime.now().isoformat(), checksum, import_id)
+                """
+                UPDATE imports
+                SET status = ?, error_message = ?, import_finished_at = ?, report_reference = ?, raw_file_path = ?
+                WHERE id = ?
+                """,
+                (
+                    "duplicate",
+                    "Report already imported",
+                    datetime.now().isoformat(),
+                    checksum[:12],
+                    existing["raw_file_path"] if existing else None,
+                    import_id,
+                ),
             )
             conn.commit()
             conn.close()
-            return {"status": "duplicate", "import_id": import_id, "fills": 0, "message": "Report already imported"}
+            return {
+                "status": "duplicate",
+                "import_id": import_id,
+                "fills": 0,
+                "message": "Report already imported",
+                "raw_file": existing["raw_file_path"] if existing else None,
+                "existing_import_id": existing["id"] if existing else None,
+            }
 
         raw_path = archive_raw(xml_text)
         fills = parse_flex_xml(xml_text)
